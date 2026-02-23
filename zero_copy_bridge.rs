@@ -982,4 +982,15 @@ mod tests {
         let result = bridge.submit_instruction(instruction);
         assert!(matches!(result, Err(BridgeError::AccessDenied)));
     }
+
+    #[test]
+    fn test_generate_tunnel_id_uses_random_non_zero_ids() {
+        let bridge = ZeroCopyBridge::new(BridgeConfig::default());
+        let id1 = bridge.generate_tunnel_id();
+        let id2 = bridge.generate_tunnel_id();
+
+        assert_ne!(id1, [0u8; 32], "tunnel IDs must not be all zeros");
+        assert_ne!(id2, [0u8; 32], "tunnel IDs must not be all zeros");
+        assert_ne!(id1, id2, "tunnel IDs should not repeat across consecutive calls");
+    }
 }

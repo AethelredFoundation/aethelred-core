@@ -972,4 +972,34 @@ mod tests {
         assert!((sim_same - 1.0).abs() < 0.001);
         assert!(sim_orthogonal.abs() < 0.001);
     }
+
+    #[test]
+    fn test_cosine_similarity_zero_vector_and_nan_inputs_fail_closed() {
+        let vault = VectorVault::new(VaultConfig::default());
+
+        let zero = vec![0.0, 0.0, 0.0];
+        let unit = vec![1.0, 0.0, 0.0];
+        let nan_vec = vec![f32::NAN, 0.0, 0.0];
+
+        assert_eq!(vault.cosine_similarity(&zero, &unit), 0.0);
+        assert_eq!(vault.cosine_similarity(&unit, &zero), 0.0);
+        assert_eq!(vault.cosine_similarity(&nan_vec, &unit), 0.0);
+    }
+
+    #[test]
+    fn test_generate_embedding_is_deterministic_and_non_zero() {
+        let vault = VectorVault::new(VaultConfig::default());
+
+        let emb1 = vault.generate_embedding("Aethelred test embedding");
+        let emb2 = vault.generate_embedding("Aethelred test embedding");
+        let emb3 = vault.generate_embedding("Different input");
+
+        assert!(!emb1.is_empty());
+        assert_eq!(emb1, emb2, "dev embedding placeholder should be deterministic");
+        assert_ne!(emb1, emb3, "different inputs should produce different embeddings");
+        assert!(emb1.iter().any(|v| v.abs() > 1e-6), "embedding should not be all zeros");
+
+        let norm = emb1.iter().map(|v| v * v).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-3, "embedding should be approximately L2-normalized");
+    }
 }

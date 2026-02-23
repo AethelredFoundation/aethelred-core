@@ -845,6 +845,40 @@ mod tests {
     }
 
     #[test]
+    fn test_burn_processing_uses_fixed_point_integer_math_for_fractional_rate() {
+        let mut engine = QuadraticBurnEngine::new(AETHTokenConfig::default());
+
+        // Preload congestion history to avoid relying on ad hoc floating-path assertions.
+        let block = BlockGasUsage {
+            block_number: 42,
+            gas_used: 21_000_000, // ~70% load
+            gas_limit: 30_000_000,
+            timestamp: 4242,
+            transaction_count: 100,
+            compute_job_count: 10,
+        };
+
+        let expected_rate = engine.calculate_burn_rate(block.gas_used as f64 / block.gas_limit as f64);
+        let expected_rate_fixed = engine.burn_rate_to_fixed(expected_rate);
+        let fees = 123_456_789u128;
+        let expected_burn = fees.saturating_mul(expected_rate_fixed) / BURN_RATE_SCALE;
+
+        let result = engine.process_block(block, fees);
+
+        assert_eq!(result.fees_burned, expected_burn);
+        assert_eq!(result.fees_to_validators, fees - expected_burn);
+    }
+
+    #[test]
+    fn test_burn_rate_to_fixed_rejects_non_finite_values() {
+        let engine = QuadraticBurnEngine::new(AETHTokenConfig::default());
+
+        assert_eq!(engine.burn_rate_to_fixed(f64::NAN), 0);
+        assert_eq!(engine.burn_rate_to_fixed(f64::INFINITY), 0);
+        assert_eq!(engine.burn_rate_to_fixed(f64::NEG_INFINITY), 0);
+    }
+
+    #[test]
     fn test_fee_calculator() {
         let mut calculator = FeeCalculator::new(FeeConfig::default());
 

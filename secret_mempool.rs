@@ -962,6 +962,38 @@ impl PrivacyGuarantees {
 mod tests {
     use super::*;
 
+    fn sample_secret_tx(id_byte: u8, gas_price: u64, priority_fee: u64) -> SecretTransaction {
+        SecretTransaction {
+            id: [id_byte; 32],
+            encrypted_payload: EncryptedPayload {
+                scheme: EncryptionScheme::ECIES_AES256GCM,
+                ciphertext: vec![id_byte; 32],
+                ephemeral_pubkey: vec![1u8; 32],
+                nonce: [2u8; 12],
+                auth_tag: [3u8; 16],
+            },
+            required_tee: TEERequirement {
+                allowed_platforms: vec![TEEPlatformType::IntelSGX],
+                min_svn: 0,
+                required_measurements: None,
+                max_attestation_age: 3600,
+            },
+            sender_pubkey: [4u8; 32],
+            gas_limit: 100000,
+            gas_price,
+            priority_fee,
+            expiry: u64::MAX,
+            compliance: ComplianceRequirements {
+                hipaa: false,
+                gdpr: false,
+                data_residency: None,
+                audit_trail: true,
+                max_retention: None,
+            },
+            signature: [5u8; 64],
+        }
+    }
+
     #[test]
     fn test_secret_mempool_creation() {
         let mempool = SecretMempool::new(SecretMempoolConfig::default());
@@ -1138,5 +1170,43 @@ mod tests {
         let report = PrivacyGuarantees::comparison_report();
         assert!(report.contains("HIPAA Compliant"));
         assert!(report.contains("Aethelred"));
+    }
+
+    #[test]
+    fn test_next_for_processing_prioritizes_effective_gas_price() {
+        let mut mempool = SecretMempool::new(SecretMempoolConfig::default());
+        let validator = [9u8; 32];
+
+        // lower effective fee (10 + 0 = 10)
+        mempool.submit(sample_secret_tx(1, 10, 0)).unwrap();
+        // higher effective fee (9 + 5 = 14) should win
+        mempool.submit(sample_secret_tx(2, 9, 5)).unwrap();
+
+        let first = mempool.next_for_processing(validator).expect("first tx");
+        let second = mempool.next_for_processing(validator).expect("second tx");
+
+        assert_eq!(first.id, [2u8; 32], "priority scheduling must prefer higher effective gas price");
+        assert_eq!(second.id, [1u8; 32]);
+    }
+
+    #[test]
+    fn test_enclave_dev_attestation_and_encryption_are_non_empty() {
+        let enclave = EnclaveExecutor::new(TEEPlatform::IntelSGX {
+            version: 2,
+            svn: 1,
+            mrenclave: [0u8; 32],
+            mrsigner: [0u8; 32],
+        });
+        let tx = sample_secret_tx(7, 10, 1);
+
+        let sealed = enclave.encrypt_for_sender(b"result-bytes", &tx.sender_pubkey).unwrap();
+        assert!(!sealed.is_empty());
+        assert!(sealed.len() > 12, "nonce + ciphertext expected");
+
+        let commitment = [8u8; 32];
+        let attestation = enclave.generate_attestation(&tx, &commitment).unwrap();
+        assert!(!attestation.report.is_empty(), "dev attestation report must not be empty");
+        assert!(!attestation.signature.is_empty(), "dev attestation signature must not be empty");
+        assert_ne!(attestation.nonce, [0u8; 32], "nonce should be randomized");
     }
 }
