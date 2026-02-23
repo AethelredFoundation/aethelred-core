@@ -32,6 +32,11 @@
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 use serde::{Deserialize, Serialize};
+use rand::rngs::OsRng;
+use rand::RngCore;
+
+#[cfg(feature = "production")]
+compile_error!("ZeroCopyBridge contains placeholder tunnel/enclave paths and must not be built for production yet");
 
 // ============================================================================
 // Data Source Types
@@ -683,18 +688,8 @@ impl ZeroCopyBridge {
     }
 
     fn generate_tunnel_id(&self) -> [u8; 32] {
-        use sha2::{Sha256, Digest};
-        let mut hasher = Sha256::new();
-        hasher.update(b"tunnel");
-        hasher.update(&(self.active_tunnels.len() as u64).to_le_bytes());
-        hasher.update(&SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-            .to_le_bytes());
-        let result = hasher.finalize();
         let mut id = [0u8; 32];
-        id.copy_from_slice(&result);
+        OsRng.fill_bytes(&mut id);
         id
     }
 

@@ -23,6 +23,15 @@
 //! This ensures that if Aethelred becomes the global AI layer, the supply shock
 //! is **massive**, rewarding early adopters.
 
+// H-08: Production safety — prevent shipping dev tokenomics stubs.
+// Building with `--features production` will fail here, forcing
+// the integrator to wire in the production-grade implementation.
+#[cfg(feature = "production")]
+compile_error!(
+    "quadratic_burn stub is active in a production build. \
+     Replace with the production tokenomics engine before shipping."
+);
+
 use std::collections::VecDeque;
 use std::time::{Duration, SystemTime};
 use serde::{Deserialize, Serialize};
@@ -305,6 +314,8 @@ pub struct QuadraticBurnEngine {
     burn_history: VecDeque<BurnRecord>,
 }
 
+const BURN_RATE_SCALE: u128 = 1_000_000_000; // 1e9 fixed-point for burn rates [0,1]
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BurnStatistics {
     /// Total AETH burned all time
@@ -360,6 +371,23 @@ impl QuadraticBurnEngine {
             .min(self.token_config.max_burn_rate)
     }
 
+    fn burn_rate_to_fixed(&self, burn_rate: f64) -> u128 {
+        if !burn_rate.is_finite() || burn_rate <= 0.0 {
+            return 0;
+        }
+        let clamped = burn_rate
+            .max(self.token_config.min_burn_rate)
+            .min(self.token_config.max_burn_rate);
+        let scaled = (clamped * BURN_RATE_SCALE as f64).floor();
+        if scaled <= 0.0 {
+            0
+        } else if scaled >= BURN_RATE_SCALE as f64 {
+            BURN_RATE_SCALE
+        } else {
+            scaled as u128
+        }
+    }
+
     /// Process a block and calculate burns
     pub fn process_block(
         &mut self,
@@ -374,7 +402,10 @@ impl QuadraticBurnEngine {
         let burn_rate = self.calculate_burn_rate(network_load);
 
         // Calculate amounts
-        let fees_to_burn = (total_fees_collected as f64 * burn_rate) as u128;
+        let burn_rate_fixed = self.burn_rate_to_fixed(burn_rate);
+        let fees_to_burn = total_fees_collected
+            .saturating_mul(burn_rate_fixed)
+            / BURN_RATE_SCALE;
         let fees_to_validators = total_fees_collected - fees_to_burn;
 
         // Record burn

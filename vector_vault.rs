@@ -29,9 +29,19 @@
 //! their "Corporate Brain" on Aethelred for 1/100th the cost of AWS or Filecoin,
 //! ready for instant AI querying.
 
+// H-08: Production safety — prevent shipping dev vector vault stubs.
+#[cfg(feature = "production")]
+compile_error!(
+    "vector_vault stub is active in a production build. \
+     Replace with the production embedding engine before shipping."
+);
+
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 use serde::{Deserialize, Serialize};
+
+#[cfg(feature = "production")]
+compile_error!("VectorVault placeholder embedding generator must be replaced before production builds");
 
 // ============================================================================
 // Vector Types
@@ -474,11 +484,14 @@ impl VectorVault {
         let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
         let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
         let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let denom = norm_a * norm_b;
+        const EPSILON: f32 = 1e-12;
 
-        if norm_a == 0.0 || norm_b == 0.0 {
+        if !denom.is_finite() || denom <= EPSILON {
             0.0
         } else {
-            dot / (norm_a * norm_b)
+            let score = dot / denom;
+            if score.is_finite() { score } else { 0.0 }
         }
     }
 
@@ -787,10 +800,51 @@ impl DocumentProcessor {
         }
     }
 
-    fn generate_embedding(&self, _text: &str) -> Vec<f32> {
-        // In production, this would call the actual embedding model
-        // For now, return random vector
-        vec![0.0; self.model.dimensions()]
+    fn generate_embedding(&self, text: &str) -> Vec<f32> {
+        // Development-only deterministic placeholder: produces stable, non-zero
+        // vectors derived from content so search behavior is testable. Production
+        // builds are blocked by the compile_error! above until a real model is wired.
+        use sha2::{Digest, Sha256};
+
+        let dims = self.model.dimensions();
+        if dims == 0 {
+            return vec![];
+        }
+
+        let mut out = vec![0.0f32; dims];
+        let mut counter: u64 = 0;
+        let mut written = 0usize;
+
+        while written < dims {
+            let mut hasher = Sha256::new();
+            hasher.update(b"aethelred-vector-vault-dev-embedding");
+            hasher.update(text.as_bytes());
+            hasher.update(counter.to_le_bytes());
+            let digest = hasher.finalize();
+
+            for chunk in digest.chunks_exact(2) {
+                if written >= dims {
+                    break;
+                }
+                let raw = u16::from_le_bytes([chunk[0], chunk[1]]);
+                // Map to [-1, 1] deterministically.
+                out[written] = (raw as f32 / 32767.5) - 1.0;
+                written += 1;
+            }
+            counter = counter.saturating_add(1);
+        }
+
+        // L2-normalize to keep cosine scores stable.
+        let norm = out.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if norm > 1e-12 {
+            for v in &mut out {
+                *v /= norm;
+            }
+        } else {
+            out[0] = 1.0;
+        }
+
+        out
     }
 
     fn generate_id(&self, content: &str, chunk_index: usize) -> [u8; 32] {

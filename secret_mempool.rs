@@ -24,6 +24,11 @@
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, SystemTime};
 use serde::{Deserialize, Serialize};
+use rand::rngs::OsRng;
+use rand::RngCore;
+
+#[cfg(feature = "production")]
+compile_error!("SecretMempool placeholder enclave crypto/attestation implementations must be replaced before production builds");
 
 // ============================================================================
 // TEE Platforms and Attestation
@@ -309,9 +314,19 @@ impl SecretMempool {
             return None;
         }
 
-        // Get highest priority (highest gas price) transaction
-        // In production, would sort by effective gas price
-        if let Some(tx) = self.pending.pop_front() {
+        // Priority scheduling: highest effective gas price first, then highest
+        // priority fee, then earliest expiry, then FIFO index.
+        let best_index = self.pending.iter().enumerate().max_by(|(ia, a), (ib, b)| {
+            let a_effective = a.gas_price.saturating_add(a.priority_fee);
+            let b_effective = b.gas_price.saturating_add(b.priority_fee);
+            a_effective
+                .cmp(&b_effective)
+                .then_with(|| a.priority_fee.cmp(&b.priority_fee))
+                .then_with(|| b.expiry.cmp(&a.expiry))
+                .then_with(|| ib.cmp(ia))
+        }).map(|(idx, _)| idx);
+
+        if let Some(tx) = best_index.and_then(|idx| self.pending.remove(idx)) {
             let tx_id = tx.id;
             self.processing.insert(tx_id, ProcessingTransaction {
                 tx: tx.clone(),
@@ -650,9 +665,18 @@ impl EnclaveExecutor {
         })
     }
 
-    fn decrypt_payload(&self, _payload: &EncryptedPayload) -> Result<Vec<u8>, EnclaveError> {
-        // In real implementation: ECDH with enclave private key + AES-GCM
-        Ok(vec![]) // Placeholder
+    fn decrypt_payload(&self, payload: &EncryptedPayload) -> Result<Vec<u8>, EnclaveError> {
+        // Development-only placeholder path: deterministic stream masking to
+        // avoid silently returning empty plaintext. Production builds are
+        // blocked by compile_error! until a real enclave crypto implementation
+        // (ECDH + AEAD with auth tag verification) is integrated.
+        if payload.ciphertext.is_empty() {
+            return Err(EnclaveError::DecryptionFailed);
+        }
+
+        let mut key_material = [0u8; 32];
+        self.derive_stream_key(&payload.ephemeral_pubkey, &payload.nonce, &mut key_material);
+        Ok(self.xor_stream(&payload.ciphertext, &key_material))
     }
 
     fn parse_operation(&self, _data: &[u8]) -> Result<EnclaveOperation, EnclaveError> {
@@ -702,9 +726,23 @@ impl EnclaveExecutor {
         result_hash
     }
 
-    fn encrypt_for_sender(&self, _result: &[u8], _sender_pubkey: &[u8; 32]) -> Result<Vec<u8>, EnclaveError> {
-        // ECDH + AES-GCM encryption
-        Ok(vec![]) // Placeholder
+    fn encrypt_for_sender(&self, result: &[u8], sender_pubkey: &[u8; 32]) -> Result<Vec<u8>, EnclaveError> {
+        if result.is_empty() {
+            return Err(EnclaveError::ExecutionFailed("empty result".to_string()));
+        }
+
+        let mut nonce = [0u8; 12];
+        OsRng.fill_bytes(&mut nonce);
+
+        let mut key_material = [0u8; 32];
+        self.derive_stream_key(sender_pubkey, &nonce, &mut key_material);
+        let mut ciphertext = self.xor_stream(result, &key_material);
+
+        // Prefix nonce so the caller has sufficient material to decrypt in dev mode.
+        let mut sealed = Vec::with_capacity(nonce.len() + ciphertext.len());
+        sealed.extend_from_slice(&nonce);
+        sealed.append(&mut ciphertext);
+        Ok(sealed)
     }
 
     fn generate_attestation(
@@ -722,15 +760,68 @@ impl EnclaveExecutor {
             .unwrap()
             .as_secs();
 
+        let mut nonce = [0u8; 32];
+        OsRng.fill_bytes(&mut nonce);
+
+        use sha2::{Digest, Sha256};
+        let mut report_hasher = Sha256::new();
+        report_hasher.update(b"aethelred-dev-attestation-report");
+        report_hasher.update(tx.id);
+        report_hasher.update(result_commitment);
+        report_hasher.update(nonce);
+        let report = report_hasher.finalize().to_vec();
+
+        let mut sig_hasher = Sha256::new();
+        sig_hasher.update(b"aethelred-dev-attestation-signature");
+        sig_hasher.update(&report);
+        sig_hasher.update(self.enclave_keypair.public_key);
+        let signature = sig_hasher.finalize().to_vec();
+
         Ok(TEEAttestation {
             platform: self.platform.clone(),
-            report: vec![], // Platform-specific report
-            signature: vec![], // Platform-specific signature
-            cert_chain: vec![], // Certificate chain
+            report,
+            signature,
+            cert_chain: vec![
+                b"DEV_PLACEHOLDER_CERT_CHAIN_REPLACE_IN_PRODUCTION".to_vec()
+            ],
             timestamp: now,
-            nonce: [0u8; 32], // Random nonce
+            nonce,
             report_data,
         })
+    }
+
+    fn derive_stream_key(&self, peer_pubkey: &[u8], nonce: &[u8; 12], out: &mut [u8; 32]) {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(b"aethelred-dev-enclave-stream-key");
+        hasher.update(self.enclave_keypair.private_key);
+        hasher.update(peer_pubkey);
+        hasher.update(nonce);
+        out.copy_from_slice(&hasher.finalize());
+    }
+
+    fn xor_stream(&self, data: &[u8], key_material: &[u8; 32]) -> Vec<u8> {
+        use sha2::{Digest, Sha256};
+
+        let mut out = Vec::with_capacity(data.len());
+        let mut counter: u64 = 0;
+        let mut offset = 0usize;
+        while offset < data.len() {
+            let mut hasher = Sha256::new();
+            hasher.update(b"aethelred-dev-keystream");
+            hasher.update(key_material);
+            hasher.update(counter.to_le_bytes());
+            let block = hasher.finalize();
+            for b in block {
+                if offset >= data.len() {
+                    break;
+                }
+                out.push(data[offset] ^ b);
+                offset += 1;
+            }
+            counter = counter.saturating_add(1);
+        }
+        out
     }
 
     fn estimate_gas(&self, _op: &EnclaveOperation) -> u64 {
