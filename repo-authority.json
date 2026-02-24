@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "repo": "AethelredFoundation/aethelred-core",
+  "role": "transitional-mirror",
+  "authority_group": "chain-go",
+  "release_authority": false,
+  "disposition": "release-frozen-transitional-mirror",
+  "mirror_source_repo": "AethelredFoundation/aethelred-cosmos-node",
+  "allow_direct_feature_development": false,
+  "ratification_status": "pending-foundation-ratification",
+  "ratification_record": "docs/governance/core-disposition-ratification.md",
+  "go_module": "github.com/aethelred/aethelred",
+  "superseded_by": "AethelredFoundation/aethelred-cosmos-node"
+}
